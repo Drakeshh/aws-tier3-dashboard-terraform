@@ -1,0 +1,15 @@
+# Terraform
+*.tfvars
+*.tfstate
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+
+# Environment variables
+.env
+
+# Flask
+instance/
+
+# AWS
+*.pem
