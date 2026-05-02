@@ -293,19 +293,27 @@ resource "aws_launch_template" "app" {
 
   user_data = base64encode(<<-EOF
     #!/bin/bash
-    set -e
     exec > /var/log/userdata.log 2>&1
+    echo "=== Starting bootstrap ==="
 
+    echo "=== Updating system ==="
     yum update -y
+
+    echo "=== Installing packages ==="
     yum install -y python3 python3-pip git
 
+    echo "=== Installing Python dependencies ==="
     pip3 install flask psycopg2-binary requests gunicorn
 
+    echo "=== Cloning repository ==="
     mkdir -p /app
     cd /app
+    git clone https://github.com/Drakeshh/aws-3tier-dashboard-terraform.git /app || echo "Git clone failed"
 
-    GIT_TERMINAL_PROMPT=0 git clone https://github.com/Drakeshh/aws-3tier-dashboard-terraform.git /app
+    echo "=== Contents of /app ==="
+    ls -la /app
 
+    echo "=== Setting environment variables ==="
     echo "DB_HOST=${aws_db_instance.main.address}" >> /etc/environment
     echo "DB_NAME=${var.db_name}" >> /etc/environment
     echo "DB_USER=${var.db_username}" >> /etc/environment
@@ -316,9 +324,16 @@ resource "aws_launch_template" "app" {
     export DB_USER="${var.db_username}"
     export DB_PASS="${var.db_password}"
 
-    cd /app/app
-    python3 -c "from app import init_db; init_db()"
-    gunicorn --bind 0.0.0.0:5000 --workers 2 --daemon app:app
+    echo "=== Contents of /app/app ==="
+    ls -la /app/app || echo "/app/app does not exist"
+
+    echo "=== Initializing database ==="
+    cd /app/app && python3 -c "from app import init_db; init_db()" || echo "DB init failed"
+
+    echo "=== Starting gunicorn ==="
+    cd /app/app && gunicorn --bind 0.0.0.0:5000 --workers 2 --daemon app:app || echo "Gunicorn failed"
+
+    echo "=== Bootstrap complete ==="
     EOF
   )
 }
