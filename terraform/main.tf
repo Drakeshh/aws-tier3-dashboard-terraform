@@ -293,6 +293,9 @@ resource "aws_launch_template" "app" {
 
   user_data = base64encode(<<-EOF
     #!/bin/bash
+    set -e
+    exec > /var/log/userdata.log 2>&1
+
     yum update -y
     yum install -y python3 python3-pip git
 
@@ -301,7 +304,7 @@ resource "aws_launch_template" "app" {
     mkdir -p /app
     cd /app
 
-    git clone https://github.com/Drakeshh/aws-3tier-dashboard-terraform.git .
+    GIT_TERMINAL_PROMPT=0 git clone https://github.com/Drakeshh/aws-3tier-dashboard-terraform.git /app
 
     echo "DB_HOST=${aws_db_instance.main.address}" >> /etc/environment
     echo "DB_NAME=${var.db_name}" >> /etc/environment
@@ -318,14 +321,6 @@ resource "aws_launch_template" "app" {
     gunicorn --bind 0.0.0.0:5000 --workers 2 --daemon app:app
     EOF
   )
-
-  tag_specifications {
-    resource_type = "instance"
-    tags = {
-      Name        = "${var.project_name}-ec2"
-      Environment = var.environment
-    }
-  }
 }
 
 resource "aws_autoscaling_group" "app" {
