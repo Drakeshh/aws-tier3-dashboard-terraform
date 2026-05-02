@@ -339,13 +339,14 @@ resource "aws_launch_template" "app" {
 }
 
 resource "aws_autoscaling_group" "app" {
-  name                = "${var.project_name}-asg"
-  vpc_zone_identifier = aws_subnet.private[*].id
-  target_group_arns   = [aws_lb_target_group.app.arn]
-  health_check_type   = "ELB"
-  min_size            = 1
-  max_size            = 3
-  desired_capacity    = 1
+  name                      = "${var.project_name}-asg"
+  vpc_zone_identifier       = aws_subnet.private[*].id
+  target_group_arns         = [aws_lb_target_group.app.arn]
+  health_check_type         = "ELB"
+  health_check_grace_period = 600   # ← add this - wait 10 minutes before checking
+  min_size                  = 1
+  max_size                  = 3
+  desired_capacity          = 1
 
   launch_template {
     id      = aws_launch_template.app.id
