@@ -54,6 +54,29 @@ resource "aws_internet_gateway" "main" {
   }
 }
 
+# Elastic IP for NAT Gateway
+resource "aws_eip" "nat" {
+  domain = "vpc"
+
+  tags = {
+    Name        = "${var.project_name}-nat-eip"
+    Environment = var.environment
+  }
+}
+
+# NAT Gateway in public subnet (allows private subnets to reach internet)
+resource "aws_nat_gateway" "main" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.public[0].id
+
+  tags = {
+    Name        = "${var.project_name}-nat"
+    Environment = var.environment
+  }
+
+  depends_on = [aws_internet_gateway.main]
+}
+
 # Route table for public subnets
 resource "aws_route_table" "public" {
   vpc_id = aws_vpc.main.id
@@ -74,6 +97,28 @@ resource "aws_route_table_association" "public" {
   count          = 2
   subnet_id      = aws_subnet.public[count.index].id
   route_table_id = aws_route_table.public.id
+}
+
+# Route table for private subnets - routes through NAT Gateway
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.main.id
+  }
+
+  tags = {
+    Name        = "${var.project_name}-private-rt"
+    Environment = var.environment
+  }
+}
+
+# Associate private subnets with private route table
+resource "aws_route_table_association" "private" {
+  count          = 2
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private.id
 }
 
 # ─────────────────────────────────────────
@@ -251,227 +296,26 @@ resource "aws_launch_template" "app" {
     yum update -y
     yum install -y python3 python3-pip git
 
-    # Install Flask app dependencies
     pip3 install flask psycopg2-binary requests gunicorn
 
-    # Create app directory
     mkdir -p /app
-
-    # Create Flask app
-    cat > /app/app.py << 'APPEOF'
-    import os
-    import json
-    import requests
-    from flask import Flask, render_template_string
-    import psycopg2
-    from datetime import datetime
-
-    app = Flask(__name__)
-
-    DB_HOST = "${aws_db_instance.main.address}"
-    DB_NAME = "${var.db_name}"
-    DB_USER = "${var.db_username}"
-    DB_PASS = "${var.db_password}"
-    INCIDENT_API = "https://api.project2.sergipratmerin.com/incidents"
-
-    def get_db():
-        return psycopg2.connect(
-            host=DB_HOST, database=DB_NAME,
-            user=DB_USER, password=DB_PASS
-        )
-
-    def init_db():
-        conn = get_db()
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS services (
-                id SERIAL PRIMARY KEY,
-                name VARCHAR(100) NOT NULL,
-                status VARCHAR(20) DEFAULT 'operational',
-                last_checked TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        cur.execute("SELECT COUNT(*) FROM services")
-        if cur.fetchone()[0] == 0:
-            services = [
-                ('Web Server', 'operational'),
-                ('Database', 'operational'),
-                ('API Gateway', 'operational'),
-                ('Cache Server', 'degraded'),
-                ('Email Service', 'operational'),
-                ('Backup Service', 'operational'),
-            ]
-            cur.executemany(
-                "INSERT INTO services (name, status) VALUES (%s, %s)",
-                services
-            )
-        conn.commit()
-        cur.close()
-        conn.close()
-
-    DASHBOARD_HTML = """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>IT Operations Dashboard</title>
-        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-        <style>
-            body { background: #0f1923; color: #fff; font-family: 'Segoe UI', sans-serif; }
-            .navbar { background: #1a2634 !important; border-bottom: 1px solid #2d3f50; }
-            .card { background: #1a2634; border: 1px solid #2d3f50; }
-            .card-header { background: #243447; border-bottom: 1px solid #2d3f50; }
-            .badge-operational { background: #1a6b3c; color: #4ade80; }
-            .badge-degraded { background: #7c5a00; color: #fbbf24; }
-            .badge-down { background: #7f1d1d; color: #f87171; }
-            .stat-card { border-left: 4px solid; }
-            .stat-critical { border-color: #ef4444; }
-            .stat-warning { border-color: #f59e0b; }
-            .stat-success { border-color: #22c55e; }
-            .stat-info { border-color: #3b82f6; }
-            .incident-critical { border-left: 3px solid #ef4444; }
-            .incident-high { border-left: 3px solid #f59e0b; }
-            .incident-medium { border-left: 3px solid #3b82f6; }
-            .incident-low { border-left: 3px solid #22c55e; }
-        </style>
-    </head>
-    <body>
-    <nav class="navbar navbar-dark mb-4">
-        <div class="container">
-            <span class="navbar-brand fw-bold">IT Operations Dashboard</span>
-            <span class="text-muted small">{{ current_time }}</span>
-        </div>
-    </nav>
-    <div class="container">
-        <div class="row g-3 mb-4">
-            <div class="col-md-3">
-                <div class="card stat-card stat-critical p-3">
-                    <div class="text-muted small">Open Incidents</div>
-                    <div class="fs-2 fw-bold text-danger">{{ stats.open }}</div>
-                </div>
-            </div>
-            <div class="col-md-3">
-                <div class="card stat-card stat-warning p-3">
-                    <div class="text-muted small">In Progress</div>
-                    <div class="fs-2 fw-bold text-warning">{{ stats.in_progress }}</div>
-                </div>
-            </div>
-            <div class="col-md-3">
-                <div class="card stat-card stat-success p-3">
-                    <div class="text-muted small">Resolved</div>
-                    <div class="fs-2 fw-bold text-success">{{ stats.resolved }}</div>
-                </div>
-            </div>
-            <div class="col-md-3">
-                <div class="card stat-card stat-info p-3">
-                    <div class="text-muted small">Services Up</div>
-                    <div class="fs-2 fw-bold text-info">{{ stats.services_up }}/{{ stats.total_services }}</div>
-                </div>
-            </div>
-        </div>
-        <div class="row g-3">
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header fw-bold">Service Status</div>
-                    <div class="card-body p-0">
-                        <table class="table table-dark table-hover mb-0">
-                            <thead><tr><th>Service</th><th>Status</th></tr></thead>
-                            <tbody>
-                            {% for s in services %}
-                            <tr>
-                                <td>{{ s.name }}</td>
-                                <td><span class="badge badge-{{ s.status }}">{{ s.status }}</span></td>
-                            </tr>
-                            {% endfor %}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header fw-bold">Recent Incidents</div>
-                    <div class="card-body p-0">
-                        {% for i in incidents %}
-                        <div class="p-3 border-bottom border-secondary incident-{{ i.severity }}">
-                            <div class="d-flex justify-content-between">
-                                <strong class="small">{{ i.title }}</strong>
-                                <span class="badge bg-secondary">{{ i.severity }}</span>
-                            </div>
-                            <div class="text-muted small mt-1">{{ i.status }} · {{ i.created_at[:10] }}</div>
-                        </div>
-                        {% endfor %}
-                    </div>
-                </div>
-            </div>
-        </div>
-        <div class="text-center text-muted small mt-4 pb-3">
-            Built with AWS EC2 · RDS · ALB · Auto Scaling · Terraform
-            · <a href="https://github.com/Drakeshh/aws-3tier-dashboard-terraform" class="text-muted">GitHub</a>
-        </div>
-    </div>
-    </body>
-    </html>
-    """
-
-    @app.route('/')
-    def dashboard():
-        try:
-            conn = get_db()
-            cur = conn.cursor()
-            cur.execute("SELECT name, status FROM services ORDER BY name")
-            rows = cur.fetchall()
-            services = [{'name': r[0], 'status': r[1]} for r in rows]
-            cur.close()
-            conn.close()
-        except:
-            services = []
-
-        try:
-            resp = requests.get(INCIDENT_API, timeout=5)
-            incidents = resp.json().get('incidents', [])[:5]
-        except:
-            incidents = []
-
-        open_inc = sum(1 for i in incidents if i.get('status') == 'open')
-        in_prog  = sum(1 for i in incidents if i.get('status') == 'in-progress')
-        resolved = sum(1 for i in incidents if i.get('status') == 'resolved')
-        svc_up   = sum(1 for s in services if s['status'] == 'operational')
-
-        stats = {
-            'open': open_inc,
-            'in_progress': in_prog,
-            'resolved': resolved,
-            'services_up': svc_up,
-            'total_services': len(services)
-        }
-
-        return render_template_string(
-            DASHBOARD_HTML,
-            services=services,
-            incidents=incidents,
-            stats=stats,
-            current_time=datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
-        )
-
-    if __name__ == '__main__':
-        init_db()
-        app.run(host='0.0.0.0', port=5000)
-    APPEOF
-
-    # Initialize DB and start app
     cd /app
-    python3 -c "
-    import sys
-    sys.path.insert(0, '/app')
-    from app import init_db
-    init_db()
-    "
 
-    # Start with gunicorn
+    git clone https://github.com/Drakeshh/aws-3tier-dashboard-terraform.git .
+
+    echo "DB_HOST=${aws_db_instance.main.address}" >> /etc/environment
+    echo "DB_NAME=${var.db_name}" >> /etc/environment
+    echo "DB_USER=${var.db_username}" >> /etc/environment
+    echo "DB_PASS=${var.db_password}" >> /etc/environment
+
+    export DB_HOST="${aws_db_instance.main.address}"
+    export DB_NAME="${var.db_name}"
+    export DB_USER="${var.db_username}"
+    export DB_PASS="${var.db_password}"
+
+    cd /app/app
+    python3 -c "from app import init_db; init_db()"
     gunicorn --bind 0.0.0.0:5000 --workers 2 --daemon app:app
-
     EOF
   )
 
